@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FVC Hybrid</title>
+<style>
+    body { font-family: Tahoma; background: #0f131a; color: #fff; padding: 20px; margin: 0; }
+    .container { max-width: 800px; margin: 0 auto; }
+    .panel { background: #191e28; border: 1px solid #303746; border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+    input, button { font-family: inherit; padding: 10px; border-radius: 8px; border: 1px solid #3a4354; }
+    input { background: #0f131a; color: #fff; width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+    button { background: linear-gradient(135deg, #ff6a00, #ff2d7d, #754cff); color: #fff; border: 0; cursor: pointer; padding: 10px 16px; font-weight: bold; }
+    .mode-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 4px 0; }
+    .mode-lan { background: rgba(34,197,94,0.2); color: #4ade80; }
+    .mode-webrtc { background: rgba(96,165,250,0.2); color: #60a5fa; }
+    .mode-unknown { background: rgba(148,163,184,0.2); color: #94a3b8; }
+    .log { background: #080b10; color: #aee6b7; padding: 10px; border-radius: 8px; font-family: monospace; font-size: 11px; height: 200px; overflow: auto; direction: ltr; text-align: left; }
+    .file-item { background: #10151e; padding: 10px; border-radius: 8px; margin-bottom: 8px; border-right: 3px solid #7c5cff; }
+    .progress-bar-container { height: 6px; background: #303746; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+    .progress-bar { height: 100%; background: linear-gradient(90deg, #ff6a00, #754cff); width: 0%; transition: width 0.3s; }
+    .peers { display: flex; gap: 8px; flex-wrap: wrap; }
+    .peer { padding: 6px 12px; background: #252c38; border-radius: 20px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+    <h2 style="text-align:center;">🚀 FVC Hybrid</h2>
+    
+    <div class="panel">
+        <h3>🔌 اتصال</h3>
+        <input id="name" placeholder="نام شما" value="کاربر">
+        <input id="room" placeholder="کد اتاق" value="1234">
+        <input id="server" placeholder="آدرس سرور" value="">
+        <button id="connect">ورود به اتاق</button>
+        <div id="modeBadge" class="mode-badge mode-unknown">⚪ نامشخص</div>
+        <div id="status" style="font-size:12px; margin-top:8px; color:#909aaa;"></div>
+    </div>
+    
+    <div class="panel">
+        <h3>👥 کاربران</h3>
+        <div class="peers" id="peers"></div>
+    </div>
+    
+    <div class="panel">
+        <h3>📤 ارسال فایل</h3>
+        <input type="file" id="fileInput" multiple style="display:none">
+        <button id="pickFile">📎 انتخاب فایل</button>
+        <div id="sendList"></div>
+    </div>
+    
+    <div class="panel">
+        <h3>📥 دریافت فایل</h3>
+        <button id="pickFolder">📁 انتخاب پوشه ذخیره</button>
+        <div id="recvList"></div>
+    </div>
+    
+    <div class="panel">
+        <h3>📋 لاگ</h3>
+        <div class="log" id="log"></div>
+    </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const CHUNK_SIZE = 256 * 1024;
+const PARALLEL = 8;
+
+let ws = null;
+let myId = null;
+let myName = '';
+let currentRoom = '';
+let currentMode = 'unknown';
+let dirHandle = null;
+
+const peers = {};
+const sendTasks = {};
+const recvTasks = {};
+
+function log(msg) {
+    const box = $('log');
+    const time = new Date().toLocaleTimeString('fa-IR');
+    box.textContent += `[${time}] ${msg}\n`;
+    box.scrollTop = box.scrollHeight;
+}
+
+function setStatus(msg, color = '#909aaa') {
+    $('status').textContent = msg;
+    $('status').style.color = color;
+}
+
+function setMode(mode) {
+    currentMode = mode;
+    const badge = $('modeBadge');
+    if (mode === 'lan') {
+        badge.className = 'mode-badge mode-lan';
+        badge.textContent = '🟢 حالت LAN (سریع)';
+    } else if (mode === 'webrtc') {
+        badge.className = 'mode-badge mode-webrtc';
+        badge.textContent = '🔵 حالت WebRTC';
+    } else {
+        badge.className = 'mode-badge mode-unknown';
+        badge.textContent = '⚪ نامشخص';
+    }
+}
+
+async function connect() {
+    myName = $('name').value.trim() || 'کاربر';
+    currentRoom = $('room').value.trim() || '1234';
+    
+    let serverURL = $('server').value.trim();
+    if (!serverURL) {
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        serverURL = proto + '//' + location.host;
+    }
+    $('server').value = serverURL;
+    
+    log(`🔌 اتصال به ${serverURL}...`);
+    setStatus('در حال اتصال...', '#fbbf24');
+    
+    ws = new WebSocket(serverURL);
+    
+    ws.onopen = () => {
+        log('✅ اتصال به سرور برقرار شد');
+        ws.send(JSON.stringify({
+            type: 'join',
+            room: currentRoom,
+            name: myName
+        }));
+    };
+    
+    ws.onmessage = async (e) => {
+        const msg = JSON.parse(e.data);
+        await handleMessage(msg);
+    };
+    
+    ws.onerror = () => {
+        log('❌ خطای اتصال');
+        setStatus('خطا در اتصال', '#ff7373');
+    };
+    
+    ws.onclose = () => {
+        log('⚠️ اتصال قطع شد');
+        setStatus('قطع شد', '#fbbf24');
+    };
+}
+
+async function handleMessage(msg) {
+    switch (msg.type) {
+        case 'joined':
+            myId = msg.yourId;
+            log(`✅ وارد اتاق شدی. ID: ${myId}`);
+            setStatus(`متصل — ${msg.peers.length} کاربر دیگه`, '#4ade80');
+            for (const peer of msg.peers) {
+                log(`🔗 شروع WebRTC با ${peer.name}`);
+                await createPeerConnection(peer.peerId, peer.name, true);
+            }
+            break;
+        case 'peer-joined':
+            log(`👤 ${msg.name} وارد شد`);
+            addPeerToList(msg.peerId, msg.name);
+            break;
+        case 'peer-left':
+            log(`👋 کاربر خارج شد`);
+            if (peers[msg.peerId]) {
+                peers[msg.peerId].pc?.close();
+                delete peers[msg.peerId];
+            }
+            removePeerFromList(msg.peerId);
+            break;
+        case 'signal':
+            await handleSignal(msg);
+            break;
+        case 'relay':
+            await handleRelay(msg);
+            break;
+    }
+}
+
+const ICE_CONFIG = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+};
+
+async function createPeerConnection(peerId, peerName, initiator) {
+    const pc = new RTCPeerConnection(ICE_CONFIG);
+    const peer = { pc, name: peerName, dc: null, mode: 'connecting', id: peerId };
+    peers[peerId] = peer;
+    
+    addPeerToList(peerId, peerName);
+    
+    pc.onicecandidate = (e) => {
+        if (e.candidate) {
+            ws.send(JSON.stringify({
+                type: 'signal',
+                target: peerId,
+                candidate: e.candidate
+            }));
+        }
+    };
+    
+    pc.onconnectionstatechange = () => {
+        log(`🔗 ${peerName}: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+            detectLANMode(pc, peerId);
+        }
+        if (['failed', 'disconnected'].includes(pc.connectionState)) {
+            peer.mode = 'relay';
+        }
+    };
+    
+    if (initiator) {
+        const dc = pc.createDataChannel('file', { ordered: true });
+        setupDataChannel(dc, peerId);
+        peer.dc = dc;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({
+            type: 'signal',
+            target: peerId,
+            sdp: offer
+        }));
+    } else {
+        pc.ondatachannel = (e) => {
+            setupDataChannel(e.channel, peerId);
+            peer.dc = e.channel;
+        };
+    }
+    
+    return peer;
+}
+
+function setupDataChannel(dc, peerId) {
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 2 * 1024 * 1024;
+    
+    dc.onopen = () => {
+        log(`✅ DataChannel با ${peers[peerId].name} باز شد`);
+        peers[peerId].mode = 'p2p';
+    };
+    
+    dc.onmessage = (e) => {
+        handleDataMessage(e.data, peerId);
+    };
+}
+
+async function handleSignal(msg) {
+    const peerId = msg.from;
+    if (!peers[peerId]) {
+        await createPeerConnection(peerId, msg.fromName, false);
+    }
+    const pc = peers[peerId].pc;
+    
+    if (msg.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        if (msg.sdp.type === 'offer') {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({
+                type: 'signal',
+                target: peerId,
+                sdp: answer
+            }));
+        }
+    }
+    
+    if (msg.candidate) {
+        try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        } catch (e) {}
+    }
+}
+
+async function detectLANMode(pc, peerId) {
+    try {
+        const stats = await pc.getStats();
+        let localCandidate = null;
+        let remoteCandidate = null;
+        
+        stats.forEach(report => {
+            if (report.type === 'local-candidate') localCandidate = report;
+            if (report.type === 'remote-candidate') remoteCandidate = report;
+        });
+        
+        const isLocalIP = (ip) => {
+            if (!ip) return false;
+            return ip.startsWith('192.168.') || 
+                   ip.startsWith('10.') || 
+                   ip.startsWith('172.') ||
+                   ip.endsWith('.local');
+        };
+        
+        if (localCandidate?.candidateType === 'host' || 
+            remoteCandidate?.candidateType === 'host') {
+            const localIP = localCandidate?.address || '';
+            const remoteIP = remoteCandidate?.address || '';
+            log(`📡 Local: ${localIP} | Remote: ${remoteIP}`);
+            
+            if (isLocalIP(localIP) && isLocalIP(remoteIP)) {
+                log('🟢 تشخیص: LAN (شبکه یکسان)');
+                peers[peerId].mode = 'lan';
+                setMode('lan');
+                return;
+            }
+        }
+        
+        log('🔵 تشخیص: WebRTC');
+        peers[peerId].mode = 'webrtc';
+        setMode('webrtc');
+    } catch (e) {
+        log(`⚠️ خطا: ${e.message}`);
+    }
+}
+
+async function handleDataMessage(data, peerId) {
+    if (typeof data === 'string') {
+        const msg = JSON.parse(data);
+        if (msg.type === 'meta') startReceive(msg, peerId);
+        if (msg.type === 'done') finalizeReceive(msg.fileId);
+        if (msg.type === 'ack') {
+            if (sendTasks[msg.fileId]) {
+                sendTasks[msg.fileId].acked.add(msg.index);
+                updateSendProgress(msg.fileId);
+            }
+        }
+        return;
+    }
+    
+    const view = new DataView(data);
+    const idLen = view.getUint16(0);
+    const fileId = new TextDecoder().decode(new Uint8Array(data, 2, idLen));
+    const index = view.getUint32(2 + idLen);
+    const chunkData = data.slice(2 + idLen + 4);
+    receiveChunk(fileId, index, chunkData, peerId);
+}
+
+async function handleRelay(msg) {
+    if (msg.relayType === 'meta') startReceive(msg, msg.from);
+    else if (msg.relayType === 'chunk') {
+        receiveChunk(msg.fileId, msg.index, base64ToArrayBuffer(msg.data), msg.from);
+    } else if (msg.relayType === 'done') finalizeReceive(msg.fileId);
+    else if (msg.relayType === 'ack') {
+        if (sendTasks[msg.fileId]) {
+            sendTasks[msg.fileId].acked.add(msg.index);
+            updateSendProgress(msg.fileId);
+        }
+    }
+}
+
+async function sendFile(file) {
+    const peerIds = Object.keys(peers);
+    if (peerIds.length === 0) return log('❌ کاربری نیست');
+    for (const peerId of peerIds) {
+        await sendFileToPeer(file, peerId);
+    }
+}
+
+async function sendFileToPeer(file, peerId) {
+    const peer = peers[peerId];
+    const fileId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    
+    sendTasks[fileId] = { file, peerId, fileId, totalChunks, acked: new Set(), startTime: Date.now() };
+    log(`📤 ارسال ${file.name} → ${peer.name} (${formatSize(file.size)})`);
+    addSendItem(fileId, file.name, file.size);
+    
+    await sendControl(peer, {
+        type: 'meta', fileId, name: file.name,
+        size: file.size, totalChunks
+    });
+    
+    await sendChunksParallel(file, fileId, peer, totalChunks);
+    await sendControl(peer, { type: 'done', fileId });
+    
+    const elapsed = (Date.now() - sendTasks[fileId].startTime) / 1000;
+    log(`✅ ${file.name} در ${elapsed.toFixed(1)}s (${formatSize(file.size / elapsed)}/s)`);
+    markSendDone(fileId);
+}
+
+async function sendChunksParallel(file, fileId, peer, totalChunks) {
+    let nextIndex = 0;
+    const task = sendTasks[fileId];
+    
+    async function worker() {
+        while (nextIndex < totalChunks) {
+            const index = nextIndex++;
+            const start = index * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = await file.slice(start, end).arrayBuffer();
+            try {
+                await sendChunk(peer, fileId, index, chunk);
+            } catch (e) {
+                log(`⚠️ خطا: ${e.message}`);
+            }
+            updateSendProgress(fileId);
+        }
+    }
+    
+    await Promise.all(Array(PARALLEL).fill(0).map(worker));
+}
+
+async function sendChunk(peer, fileId, index, chunk) {
+    const packet = buildChunkPacket(fileId, index, chunk);
+    if (peer.dc?.readyState === 'open') {
+        while (peer.dc.bufferedAmount > 16 * 1024 * 1024) {
+            await sleep(20);
+        }
+        peer.dc.send(packet);
+    } else if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'relay', target: peer.id, relayType: 'chunk',
+            fileId, index, data: arrayBufferToBase64(chunk)
+        }));
+    } else {
+        throw new Error('No transport');
+    }
+}
+
+async function sendControl(peer, msg) {
+    if (peer.dc?.readyState === 'open') {
+        peer.dc.send(JSON.stringify(msg));
+    } else if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'relay', target: peer.id, relayType: msg.type, ...msg
+        }));
+    }
+}
+
+function buildChunkPacket(fileId, index, chunk) {
+    const idBytes = new TextEncoder().encode(fileId);
+    const buffer = new ArrayBuffer(2 + idBytes.length + 4 + chunk.byteLength);
+    const view = new DataView(buffer);
+    const bytes = new Uint8Array(buffer);
+    view.setUint16(0, idBytes.length);
+    bytes.set(idBytes, 2);
+    view.setUint32(2 + idBytes.length, index);
+    bytes.set(new Uint8Array(chunk), 2 + idBytes.length + 4);
+    return buffer;
+}
+
+function startReceive(meta, peerId) {
+    if (recvTasks[meta.fileId]) return;
+    recvTasks[meta.fileId] = {
+        name: meta.name, size: meta.size, totalChunks: meta.totalChunks,
+        chunks: {}, received: 0, peerId, startTime: Date.now()
+    };
+    log(`📥 دریافت ${meta.name} (${formatSize(meta.size)})`);
+    addRecvItem(meta.fileId, meta.name, meta.size);
+}
+
+function receiveChunk(fileId, index, data, peerId) {
+    const task = recvTasks[fileId];
+    if (!task) return;
+    if (!task.chunks[index]) {
+        task.chunks[index] = data;
+        task.received++;
+    }
+    const peer = peers[peerId];
+    if (peer) sendControl(peer, { type: 'ack', fileId, index });
+    updateRecvProgress(fileId);
+}
+
+async function finalizeReceive(fileId) {
+    const task = recvTasks[fileId];
+    if (!task) return;
+    
+    const missing = [];
+    for (let i = 0; i < task.totalChunks; i++) {
+        if (!task.chunks[i]) missing.push(i);
+    }
+    if (missing.length > 0) {
+        log(`⚠️ ${missing.length} chunk گم شده`);
+        return;
+    }
+    
+    const parts = [];
+    for (let i = 0; i < task.totalChunks; i++) parts.push(task.chunks[i]);
+    const blob = new Blob(parts);
+    
+    if (dirHandle) {
+        try {
+            const fh = await dirHandle.getFileHandle(task.name, { create: true });
+            const w = await fh.createWritable();
+            await w.write(blob);
+            await w.close();
+            log(`💾 ذخیره شد: ${task.name}`);
+        } catch (e) {
+            downloadBlob(blob, task.name);
+        }
+    } else {
+        downloadBlob(blob, task.name);
+    }
+    
+    const elapsed = (Date.now() - task.startTime) / 1000;
+    log(`✅ ${task.name} دریافت شد (${formatSize(task.size / elapsed)}/s)`);
+    markRecvDone(fileId);
+    delete recvTasks[fileId];
+}
+
+function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function addPeerToList(id, name) {
+    removePeerFromList(id);
+    const div = document.createElement('div');
+    div.className = 'peer';
+    div.id = `peer-${id}`;
+    div.textContent = `🟢 ${name}`;
+    $('peers').appendChild(div);
+}
+
+function removePeerFromList(id) {
+    document.getElementById(`peer-${id}`)?.remove();
+}
+
+function addSendItem(fileId, name, size) {
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.id = `send-${fileId}`;
+    div.innerHTML = `
+        <div>📤 ${name}</div>
+        <div style="font-size:11px;color:#909aaa;">${formatSize(size)}</div>
+        <div class="progress-bar-container"><div class="progress-bar" id="send-bar-${fileId}"></div></div>
+        <div style="font-size:11px;" id="send-status-${fileId}">0%</div>
+    `;
+    $('sendList').appendChild(div);
+}
+
+function updateSendProgress(fileId) {
+    const task = sendTasks[fileId];
+    if (!task) return;
+    const pct = (task.acked.size / task.totalChunks) * 100;
+    const bar = document.getElementById(`send-bar-${fileId}`);
+    const status = document.getElementById(`send-status-${fileId}`);
+    if (bar) bar.style.width = pct + '%';
+    if (status) status.textContent = `${pct.toFixed(1)}% (${task.acked.size}/${task.totalChunks})`;
+}
+
+function markSendDone(fileId) {
+    const item = document.getElementById(`send-${fileId}`);
+    if (item) item.style.borderRightColor = '#22c55e';
+}
+
+function addRecvItem(fileId, name, size) {
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.id = `recv-${fileId}`;
+    div.innerHTML = `
+        <div>📥 ${name}</div>
+        <div style="font-size:11px;color:#909aaa;">${formatSize(size)}</div>
+        <div class="progress-bar-container"><div class="progress-bar" id="recv-bar-${fileId}"></div></div>
+        <div style="font-size:11px;" id="recv-status-${fileId}">0%</div>
+    `;
+    $('recvList').appendChild(div);
+}
+
+function updateRecvProgress(fileId) {
+    const task = recvTasks[fileId];
+    if (!task) return;
+    const pct = (task.received / task.totalChunks) * 100;
+    const bar = document.getElementById(`recv-bar-${fileId}`);
+    const status = document.getElementById(`recv-status-${fileId}`);
+    if (bar) bar.style.width = pct + '%';
+    if (status) status.textContent = `${pct.toFixed(1)}% (${task.received}/${task.totalChunks})`;
+}
+
+function markRecvDone(fileId) {
+    const item = document.getElementById(`recv-${fileId}`);
+    if (item) item.style.borderRightColor = '#22c55e';
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function formatSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+}
+
+function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    }
+    return btoa(binary);
+}
+
+function base64ToArrayBuffer(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+}
+
+$('connect').onclick = connect;
+$('pickFile').onclick = () => $('fileInput').click();
+$('fileInput').onchange = async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) await sendFile(file);
+    e.target.value = '';
+};
+$('pickFolder').onclick = async () => {
+    if (!window.showDirectoryPicker) return log('❌ مرورگر پشتیبانی نمی‌کنه');
+    try {
+        dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        log(`📁 پوشه: ${dirHandle.name}`);
+    } catch (e) {}
+};
+
+log('🚀 FVC Hybrid آماده');
+</script>
+</body>
+</html>
