@@ -118,7 +118,7 @@ async function connect() {
     log(`🔌 اتصال به ${serverURL}...`);
     setStatus('در حال اتصال...', '#fbbf24');
     
-    ws = new WebSocket(serverURL);
+    ws = new WebSocket(serverURL + '?room=' + currentRoom);
     
     ws.onopen = () => {
         log('✅ اتصال به سرور برقرار شد');
