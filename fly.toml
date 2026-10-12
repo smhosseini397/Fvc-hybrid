@@ -1,4 +1,4 @@
-app = "fvc-hybrid"
+app = "fvc-hybrid-9274"
 primary_region = "fra"
 
 [build]
