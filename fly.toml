@@ -1,21 +1,26 @@
-app = "fvc-hybrid-smh"
-primary_region = "fra"
+# fly.toml app configuration file generated for fvc-hybrid on 2026-10-12T00:59:14Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'fvc-hybrid'
+primary_region = 'ams'
 
 [build]
-  builder = "paketobuildpacks/builder:base"
+  builder = 'paketobuildpacks/builder:base'
 
 [env]
-  PORT = "8080"
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
 [[vm]]
-  cpu_kind = "shared"
+  cpu_kind = 'shared'
   cpus = 1
   memory_mb = 256
